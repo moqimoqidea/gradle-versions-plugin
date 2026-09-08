@@ -1,6 +1,7 @@
 package com.github.benmanes.gradle.versions.updates.resolutionstrategy
 
 import com.github.benmanes.gradle.versions.updates.VersionMapping
+import com.github.benmanes.gradle.versions.updates.VersionStability
 import org.gradle.api.artifacts.ComponentSelection
 import org.gradle.api.artifacts.VersionConstraint
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.DefaultVersionComparator
@@ -26,6 +27,8 @@ class ComponentSelectionWithCurrent internal constructor(
   private val onScriptClasspath: Boolean = false,
   /** Called when a rule reads [satisfiesDeclaredBound], so the deprecation can be warned once. */
   private val onDeprecatedBoundRead: () -> Unit = {},
+  /** The check behind [isPreRelease], the built-in markers plus the convention added in the build. */
+  private val preReleaseCheck: (String) -> Boolean = VersionStability::isPreRelease,
 ) : ComponentSelection by delegate {
   /** Retained so the arity released before the constraint was added still links. */
   constructor(
@@ -55,35 +58,35 @@ class ComponentSelectionWithCurrent internal constructor(
    * the consumer depends on set for it, and the version currently selected is always within
    * bound.
    */
-  internal val withinDeclaredBound: Boolean
+  internal val withinDeclaredBounds: Boolean
     get() =
       DeclaredBound.accepts(versionConstraint, candidate.version, currentVersion, onScriptClasspath) &&
         DeclaredBound.acceptsPlatformSupplied(platformVersionConstraints, currentVersion, candidate.version)
 
   /**
-   * Whether the candidate lies within the declared bound, as [withinDeclaredBound] reads it.
+   * Whether the candidate lies within the declared bound, as [withinDeclaredBounds] reads it.
    *
-   * Deprecated: the task's `rejectOutOfBoundVersions` property leaves a candidate outside the
-   * declared bound out of the report on its own, so nothing is left for a rule to reject.
+   * Deprecated: the task's `rejectOutOfBounds` property leaves a candidate outside the declared
+   * bound out of the report on its own, so nothing is left for a rule to reject.
    */
-  @Deprecated("rejectOutOfBoundVersions applies the declared bound; drop the clause from rejectVersionIf.")
+  @Deprecated("rejectOutOfBounds applies the declared bound; drop the clause from rejectVersionIf.")
   val satisfiesDeclaredBound: Boolean
     get() {
       onDeprecatedBoundRead()
-      return withinDeclaredBound
+      return withinDeclaredBounds
     }
 
   /**
    * Whether the candidate is an upgrade that lies outside the declared bound, which is what the
-   * task's `rejectOutOfBoundVersions` property leaves out of the report.
+   * task's `rejectOutOfBounds` property leaves out of the report.
    *
-   * The condition is narrower than [withinDeclaredBound], which is evaluated for the candidate
+   * The condition is narrower than [withinDeclaredBounds], which is evaluated for the candidate
    * alone. A candidate no newer than the version in use is not an upgrade at all, and rejecting it
    * would take the exceeded entry off the report while leaving nothing out. Each bound is applied
    * only where the version in use lies within it: a platform that a transitive requirement pushed
    * the version past bounds nothing, while a second platform pinning the version in use still does.
    */
-  internal val isUpgradeOutOfDeclaredBound: Boolean
+  internal val isUpgradeOutOfDeclaredBounds: Boolean
     get() =
       DeclaredBound.isUpgradeOutOfBound(
         versionConstraint,
@@ -92,6 +95,33 @@ class ComponentSelectionWithCurrent internal constructor(
         candidate.version,
         onScriptClasspath,
       )
+
+  /**
+   * Returns whether [version] is a pre-release, by the same check the task's `rejectPreReleases`
+   * property applies, the built-in markers plus any convention added with `preReleaseVersionIf`, so
+   * a rule written with it leaves out what the property leaves out. Takes the version to read, for
+   * a rule that reads some version other than the candidate's; the no-argument form is the check as
+   * the property applies it.
+   */
+  fun isPreRelease(version: String): Boolean = preReleaseCheck(version)
+
+  /**
+   * Returns whether the candidate is a pre-release while the version in use is not, which is what
+   * the task's `rejectPreReleases` property leaves out of the report. Narrower than [isPreRelease]
+   * of the candidate alone: a build already on a pre-release is shown the next one, so for it this
+   * is false. The same as `isPreRelease(candidate.version) && !isPreRelease(currentVersion)`.
+   */
+  fun isPreRelease(): Boolean = preReleaseCheck(candidate.version) && !preReleaseCheck(currentVersion)
+
+  /**
+   * Returns whether the candidate is an upgrade lying outside the declared bound, which is what the
+   * task's `rejectOutOfBounds` property leaves out of the report.
+   *
+   * A function rather than a property, so that one spelling serves both DSLs. A `val` reads without
+   * parentheses in Kotlin, and in Groovy as `outOfDeclaredBounds` or as `isOutOfDeclaredBounds()`, so
+   * no single spelling would.
+   */
+  fun isOutOfDeclaredBounds(): Boolean = isUpgradeOutOfDeclaredBounds
 
   override fun toString(): String {
     return """\

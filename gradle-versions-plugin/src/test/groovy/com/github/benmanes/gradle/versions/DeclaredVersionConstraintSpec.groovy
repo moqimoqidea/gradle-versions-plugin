@@ -139,7 +139,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
     then: 'guice stops below the version it rejects, guava is unaffected'
     report().outdated.dependencies*.name == ['guava', 'guice']
     report().outdated.dependencies.find { it.name == 'guice' }.available.milestone == '3.0'
-    report().outdated.dependencies.find { it.name == 'guava' }.available.milestone == '16.0-rc1'
+    report().outdated.dependencies.find { it.name == 'guava' }.available.milestone == '16.0'
     report().unresolved.dependencies.isEmpty()
   }
 
@@ -238,6 +238,63 @@ final class DeclaredVersionConstraintSpec extends Specification {
     !result.output.contains('satisfiesDeclaredBound is deprecated')
   }
 
+  def 'a Groovy rule reading isOutOfDeclaredBounds leaves out what the property would'() {
+    given: 'the property is off, so the rule is the only thing that can reject'
+    writeBuildFile(
+      """
+        api('com.google.inject:guice') {
+          version {
+            require '2.0'
+            reject '3.1'
+          }
+        }
+        api 'com.google.guava:guava:15.0'
+      """,
+      """
+        rejectOutOfBounds = false
+        rejectVersionIf {
+          isOutOfDeclaredBounds()
+        }
+      """)
+
+    when:
+    def result = run()
+
+    then: 'guice stops below the version it rejects, and the unbounded guava is unaffected'
+    report().outdated.dependencies*.name == ['guava', 'guice']
+    report().outdated.dependencies.find { it.name == 'guice' }.available.milestone == '3.0'
+    report().outdated.dependencies.find { it.name == 'guava' }.available.milestone == '16.0'
+
+    and: 'the member is not the deprecated one'
+    !result.output.contains('satisfiesDeclaredBound is deprecated')
+  }
+
+  def 'a rule reading isOutOfDeclaredBounds is applied under the command line option too'() {
+    given: 'the property is off, so the rule is the only thing that can reject'
+    writeBuildFile(
+      """
+        api('com.google.inject:guice') {
+          version {
+            require '2.0'
+            reject '3.1'
+          }
+        }
+      """,
+      """
+        rejectOutOfBounds = false
+        rejectVersionIf {
+          isOutOfDeclaredBounds()
+        }
+      """)
+
+    when: 'the option turns off a built-in check the build already turned off'
+    run('--no-reject-out-of-bounds')
+
+    then: 'the rule is the build\'s own, and still stops guice below the version it rejects'
+    report().outdated.dependencies*.name == ['guice']
+    report().outdated.dependencies[0].available.milestone == '3.0'
+  }
+
   def 'a constraint stating a range still bounds the report, though its version reads as a range'() {
     given: 'a constraint with no declaration beside it, so the row reports the range as its version'
     writeBuildFile(
@@ -284,7 +341,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
     guice.available.milestone == '2.0'
   }
 
-  def 'with rejectOutOfBoundVersions = false the version the build rejects is listed'() {
+  def 'with rejectOutOfBounds = false the version the build rejects is listed'() {
     given:
     writeBuildFile(
       """
@@ -295,7 +352,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
           }
         }
       """,
-      'rejectOutOfBoundVersions = false')
+      'rejectOutOfBounds = false')
 
     when:
     run()
@@ -319,7 +376,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
       '')
 
     when:
-    run('--no-reject-out-of-bound-versions')
+    run('--no-reject-out-of-bounds')
 
     then: 'the version left out by the bound is listed'
     report().outdated.dependencies*.name == ['guice']
@@ -353,7 +410,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
         tasks.named<DependencyUpdatesTask>("dependencyUpdates") {
           outputFormatter = "json"
           checkForGradleUpdate = false
-          rejectOutOfBoundVersions = false
+          rejectOutOfBounds = false
         }
       """.stripIndent()
 
@@ -554,7 +611,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
 
     then: 'every upgrade still shows; bounding on a bare require would empty the report'
     report().outdated.dependencies*.name == ['guava', 'guice']
-    report().outdated.dependencies.find { it.name == 'guava' }.available.milestone == '16.0-rc1'
+    report().outdated.dependencies.find { it.name == 'guava' }.available.milestone == '16.0'
     report().outdated.dependencies.find { it.name == 'guice' }.available.milestone == '3.1'
   }
 
@@ -764,7 +821,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
         api platform('org.apache.logging.log4j:log4j:2.16.0')
         api 'org.apache.logging.log4j:log4j-core'
       """,
-      'rejectOutOfBoundVersions = false')
+      'rejectOutOfBounds = false')
 
     when:
     run()
@@ -806,7 +863,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
       """,
       """
         checkConstraints = true
-        rejectOutOfBoundVersions = false
+        rejectOutOfBounds = false
         rejectVersionIf {
           if (candidate.module == 'log4j-core' && currentVersion == '2.16.0') {
             println "PROBE \${candidate.module}@\${candidate.version} bound=\${satisfiesDeclaredBound}" +
@@ -1026,7 +1083,7 @@ final class DeclaredVersionConstraintSpec extends Specification {
       """,
       """
         checkConstraints = true
-        rejectOutOfBoundVersions = false
+        rejectOutOfBounds = false
         rejectVersionIf {
           if (candidate.module == 'guice' && currentVersion == '2.0') {
             println "PROBE guice@\${candidate.version} bound=\${satisfiesDeclaredBound}"

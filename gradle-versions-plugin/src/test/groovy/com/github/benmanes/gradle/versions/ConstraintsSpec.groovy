@@ -1130,7 +1130,7 @@ final class ConstraintsSpec extends Specification {
           checkConstraints = true
           // The mark is withheld from a merged entry, which the bound would otherwise split by
           // holding the importing project to the platform while the declaring one rises past it.
-          rejectOutOfBoundVersions = false
+          rejectOutOfBounds = false
         }
       """.stripIndent()
 

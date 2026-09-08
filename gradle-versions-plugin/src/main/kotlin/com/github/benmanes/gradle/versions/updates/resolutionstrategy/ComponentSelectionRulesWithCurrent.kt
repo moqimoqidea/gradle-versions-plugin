@@ -1,6 +1,7 @@
 package com.github.benmanes.gradle.versions.updates.resolutionstrategy
 
 import com.github.benmanes.gradle.versions.updates.Coordinate
+import com.github.benmanes.gradle.versions.updates.VersionStability
 import groovy.lang.Closure
 import org.gradle.api.Action
 import org.gradle.api.artifacts.ComponentSelection
@@ -12,6 +13,7 @@ class ComponentSelectionRulesWithCurrent internal constructor(
   private val delegate: ComponentSelectionRules,
   private val currentCoordinates: Map<Coordinate.Key, Coordinate>,
   private val onDeprecatedBoundRead: () -> Unit,
+  private val isPreRelease: (String) -> Boolean = VersionStability::isPreRelease,
 ) {
   /** Retained so the arity released before the deprecation warning was added still links. */
   constructor(
@@ -123,6 +125,7 @@ class ComponentSelectionRulesWithCurrent internal constructor(
       current.platformVersionConstraints,
       current.onScriptClasspath,
       onDeprecatedBoundRead,
+      isPreRelease,
     )
   }
 }

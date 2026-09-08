@@ -40,7 +40,7 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
 
   /**
    * The settings as the producers resolved them, wired by the plugin from the shared settings so
-   * that they are read back as resolved rather than as configured on this project alone. All four
+   * that they are read back as resolved rather than as configured on this project alone. All five
    * are taken from one resolution, so a read cannot mix them. The convention covers a task the
    * plugin did not register, where only this project's own settings are known.
    */
@@ -48,13 +48,14 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
   internal val inherited: Property<InheritedSettings> =
     project.objects.property(InheritedSettings::class.java).convention(
       project.provider {
+        val revision =
+          settingOf(
+            parameters.revisionFromCommandLine,
+            "revision",
+            parameters.revision ?: DEFAULT_REVISION,
+          )
         InheritedSettings(
-          revision =
-            settingOf(
-              parameters.revisionFromCommandLine,
-              "revision",
-              parameters.revision ?: DEFAULT_REVISION,
-            ),
+          revision = revision,
           checkConstraints =
             settingOf(
               parameters.checkConstraintsFromCommandLine,
@@ -65,10 +66,15 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
               parameters.checkBuildEnvironmentConstraintsFromCommandLine,
               parameters.checkBuildEnvironmentConstraints ?: false,
             ),
-          rejectOutOfBoundVersions =
+          rejectOutOfBounds =
             settingOf(
-              parameters.rejectOutOfBoundVersionsFromCommandLine,
-              parameters.rejectOutOfBoundVersions ?: true,
+              parameters.rejectOutOfBoundsFromCommandLine,
+              parameters.rejectOutOfBounds ?: true,
+            ),
+          rejectPreReleases =
+            settingOf(
+              parameters.rejectPreReleasesFromCommandLine,
+              parameters.rejectPreReleases ?: (revision != INTEGRATION_REVISION),
             ),
         )
       },
@@ -275,19 +281,42 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
   }
 
   @get:Input
-  var rejectOutOfBoundVersions: Boolean
-    get() = inherited.get().rejectOutOfBoundVersions
+  var rejectOutOfBounds: Boolean
+    get() = inherited.get().rejectOutOfBounds
     set(value) {
-      parameters.rejectOutOfBoundVersions = value
+      parameters.rejectOutOfBounds = value
     }
 
   /** Leaves out the versions outside a declared bound for this invocation alone. */
   @Option(
-    option = "reject-out-of-bound-versions",
+    option = "reject-out-of-bounds",
     description = "Leaves out the versions outside a declared bound or a consumed platform's.",
   )
-  internal fun setRejectOutOfBoundVersionsFromCommandLine(rejectOutOfBoundVersions: Boolean) {
-    parameters.rejectOutOfBoundVersionsFromCommandLine = rejectOutOfBoundVersions
+  internal fun setRejectOutOfBoundsFromCommandLine(rejectOutOfBounds: Boolean) {
+    parameters.rejectOutOfBoundsFromCommandLine = rejectOutOfBounds
+  }
+
+  /**
+   * Whether a pre-release candidate is left out of the report while the current version is not
+   * itself a pre-release, so that newer pre-releases are still reported to a build on one. A
+   * convention the built-in markers do not cover is added to the check with [preReleaseVersionIf].
+   * Off by default under the `integration` revision, which selects the newest version whatever its
+   * qualifier, and read back as `false` there unless set.
+   */
+  @get:Input
+  var rejectPreReleases: Boolean
+    get() = inherited.get().rejectPreReleases
+    set(value) {
+      parameters.rejectPreReleases = value
+    }
+
+  /** Leaves out a pre-release candidate, or lets one through, for this invocation alone. */
+  @Option(
+    option = "reject-pre-releases",
+    description = "Leaves out a pre-release candidate when the current version is not a pre-release.",
+  )
+  internal fun setRejectPreReleasesFromCommandLine(rejectPreReleases: Boolean) {
+    parameters.rejectPreReleasesFromCommandLine = rejectPreReleases
   }
 
   @Internal
@@ -431,6 +460,45 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
     }
   }
 
+  /**
+   * Adds a convention the built-in markers do not cover, such as graphql-java's `-nf-` builds, to
+   * the pre-release check. A version the [filter] matches is a pre-release wherever the check reads
+   * one: it is left out under [rejectPreReleases] and its command line option, a build already on
+   * one is still shown a newer one, and `isPreRelease` in a [rejectVersionIf] rule is true for it.
+   * The convention is part of the built-in check, so it is off wherever that check is, under
+   * `rejectPreReleases = false` and by default under the `integration` revision. It is given the
+   * version with any build metadata removed, as the markers are, and it is applied to the version
+   * in use as well as to the candidate, which for a constraint declared with no dependency beside
+   * it is the constraint's own range text. Called more than once on a task, the filters accumulate;
+   * a subproject that calls it replaces the root's rather than adding to it, as with the other
+   * predicate settings.
+   */
+  fun preReleaseVersionIf(filter: Spec<String>) {
+    val existing = parameters.preReleaseVersionIf
+    parameters.preReleaseVersionIf =
+      if (existing == null) filter else Spec { existing.isSatisfiedBy(it) || filter.isSatisfiedBy(it) }
+  }
+
+  /**
+   * Exempts the candidates the [filter] matches from the built-in checks, `rejectPreReleases` and
+   * `rejectOutOfBounds`, so that the checks stay on for the rest of the build. A candidate is
+   * exempt from both; a filter that reads `!isOutOfDeclaredBounds()` or `!isPreRelease()` keeps that
+   * check. The checks are applied with the exemption inside them, so their properties and command
+   * line options apply as they do without it. A [rejectVersionIf] rule is applied whatever the
+   * filter matches. Called more than once on a task, the filters accumulate; a subproject that
+   * calls it replaces the root's rather than adding to it, as with the other predicate settings.
+   */
+  fun exemptFromBuiltInChecksIf(filter: ComponentFilter) {
+    val existing = parameters.exemptFromBuiltInChecksIf
+    parameters.exemptFromBuiltInChecksIf =
+      if (existing == null) filter else ComponentFilter { existing.reject(it) || filter.reject(it) }
+  }
+
+  /** Registers a Groovy [closure] as the exemption, with `candidate` resolved as [rejectVersionIf] does. */
+  fun exemptFromBuiltInChecksIf(closure: Closure<*>) {
+    exemptFromBuiltInChecksIf(closureFilter(closure))
+  }
+
   fun rejectVersionIf(filter: ComponentFilter) {
     resolutionStrategy { strategy ->
       strategy.componentSelection { selection ->
@@ -452,15 +520,16 @@ open class DependencyUpdatesTask : DefaultTask() { // tasks can't be final
    * selection whether the closure uses the bare implicit receiver or an explicit parameter.
    */
   fun rejectVersionIf(closure: Closure<*>) {
-    rejectVersionIf(
-      ComponentFilter { current ->
-        // Selections are evaluated concurrently, so give each its own copy to set the delegate on.
-        val invocation = closure.clone() as Closure<*>
-        invocation.delegate = current
-        DefaultTypeTransformation.castToBoolean(invocation.call(current))
-      },
-    )
+    rejectVersionIf(closureFilter(closure))
   }
+
+  private fun closureFilter(closure: Closure<*>): ComponentFilter =
+    ComponentFilter { current ->
+      // Selections are evaluated concurrently, so give each its own copy to set the delegate on.
+      val invocation = closure.clone() as Closure<*>
+      invocation.delegate = current
+      DefaultTypeTransformation.castToBoolean(invocation.call(current))
+    }
 
   /**
    * Accumulates the provided strategy with any previously registered one, or clears every

@@ -1,6 +1,7 @@
 package com.github.benmanes.gradle.versions.updates.resolutionstrategy
 
 import com.github.benmanes.gradle.versions.updates.Coordinate
+import com.github.benmanes.gradle.versions.updates.VersionStability
 import groovy.lang.Closure
 import org.gradle.api.Action
 import org.gradle.api.artifacts.DependencyResolveDetails
@@ -11,6 +12,8 @@ class ResolutionStrategyWithCurrent internal constructor(
   private val delegate: ResolutionStrategy,
   private val currentCoordinates: Map<Coordinate.Key, Coordinate>,
   private val onDeprecatedBoundRead: () -> Unit,
+  /** The pre-release check a rule reads, the built-in markers plus the convention added in the build. */
+  private val isPreRelease: (String) -> Boolean = VersionStability::isPreRelease,
 ) {
   /** Retained so the arity released before the deprecation warning was added still links. */
   constructor(
@@ -65,6 +68,7 @@ class ResolutionStrategyWithCurrent internal constructor(
       delegate.componentSelection,
       currentCoordinates,
       onDeprecatedBoundRead,
+      isPreRelease,
     )
   }
 }

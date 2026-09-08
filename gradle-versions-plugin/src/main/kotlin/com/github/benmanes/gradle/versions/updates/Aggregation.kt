@@ -2,6 +2,7 @@ package com.github.benmanes.gradle.versions.updates
 
 import com.github.benmanes.gradle.versions.claims
 import com.github.benmanes.gradle.versions.reporter.projectsLabel
+import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ComponentFilter
 import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ResolutionStrategyWithCurrent
 import org.gradle.api.Action
 import org.gradle.api.GradleException
@@ -71,6 +72,9 @@ internal fun <T : Any> settingOf(
 /** The revision level resolved against when neither the build nor an override states one. */
 internal const val DEFAULT_REVISION = "milestone"
 
+/** The revision that selects the newest version whatever its qualifier, snapshots included. */
+internal const val INTEGRATION_REVISION = "integration"
+
 /** The task settings that a project's producer reads while its input is realized; null is unset. */
 internal class DependencyUpdatesParameters {
   var revision: String? = null
@@ -87,11 +91,18 @@ internal class DependencyUpdatesParameters {
   @Transient
   var resolutionStrategy: Action<in ResolutionStrategyWithCurrent>? = null
 
+  @Transient
+  var preReleaseVersionIf: Spec<String>? = null
+
+  @Transient
+  var exemptFromBuiltInChecksIf: ComponentFilter? = null
+
   /** Distinguishes a strategy that was explicitly cleared from one that was never set. */
   var resolutionStrategySet: Boolean = false
   var checkConstraints: Boolean? = null
   var checkBuildEnvironmentConstraints: Boolean? = null
-  var rejectOutOfBoundVersions: Boolean? = null
+  var rejectOutOfBounds: Boolean? = null
+  var rejectPreReleases: Boolean? = null
 
   /**
    * Set by the task's command line options. Read ahead of every configured value in the chain, so
@@ -99,7 +110,8 @@ internal class DependencyUpdatesParameters {
    */
   var checkConstraintsFromCommandLine: Boolean? = null
   var checkBuildEnvironmentConstraintsFromCommandLine: Boolean? = null
-  var rejectOutOfBoundVersionsFromCommandLine: Boolean? = null
+  var rejectOutOfBoundsFromCommandLine: Boolean? = null
+  var rejectPreReleasesFromCommandLine: Boolean? = null
 }
 
 /**
@@ -154,18 +166,21 @@ internal abstract class DependencyUpdatesParametersService :
       generateSequence(path) { if (it == ":") null else it.substringBeforeLast(':').ifEmpty { ":" } }
         .mapNotNull { byPath[it] }
         .toList()
+    val revision =
+      settingOf(
+        fromCommandLine = chain.firstNotNullOfOrNull { it.revisionFromCommandLine },
+        systemPropertyName = "revision",
+        configured = chain.firstNotNullOfOrNull { it.revision } ?: DEFAULT_REVISION,
+      )
     return ResolvedParameters(
-      revision =
-        settingOf(
-          fromCommandLine = chain.firstNotNullOfOrNull { it.revisionFromCommandLine },
-          systemPropertyName = "revision",
-          configured = chain.firstNotNullOfOrNull { it.revision } ?: DEFAULT_REVISION,
-        ),
+      revision = revision,
       filterConfigurations =
         chain.firstNotNullOfOrNull { it.filterConfigurations } ?: ALL_CONFIGURATIONS,
       filterDeclaredConfigurations =
         chain.firstNotNullOfOrNull { it.filterDeclaredConfigurations } ?: ALL_DECLARED_CONFIGURATIONS,
       resolutionStrategy = chain.firstOrNull { it.resolutionStrategySet }?.resolutionStrategy,
+      preReleaseVersionIf = chain.firstNotNullOfOrNull { it.preReleaseVersionIf },
+      exemptFromBuiltInChecksIf = chain.firstNotNullOfOrNull { it.exemptFromBuiltInChecksIf },
       checkConstraints =
         settingOf(
           fromCommandLine = chain.firstNotNullOfOrNull { it.checkConstraintsFromCommandLine },
@@ -177,10 +192,18 @@ internal abstract class DependencyUpdatesParametersService :
             chain.firstNotNullOfOrNull { it.checkBuildEnvironmentConstraintsFromCommandLine },
           configured = chain.firstNotNullOfOrNull { it.checkBuildEnvironmentConstraints } ?: false,
         ),
-      rejectOutOfBoundVersions =
+      rejectOutOfBounds =
         settingOf(
-          fromCommandLine = chain.firstNotNullOfOrNull { it.rejectOutOfBoundVersionsFromCommandLine },
-          configured = chain.firstNotNullOfOrNull { it.rejectOutOfBoundVersions } ?: true,
+          fromCommandLine = chain.firstNotNullOfOrNull { it.rejectOutOfBoundsFromCommandLine },
+          configured = chain.firstNotNullOfOrNull { it.rejectOutOfBounds } ?: true,
+        ),
+      // Off by default under the integration revision, which selects the newest version whatever
+      // its qualifier, snapshots included. An explicit setting still applies there.
+      rejectPreReleases =
+        settingOf(
+          fromCommandLine = chain.firstNotNullOfOrNull { it.rejectPreReleasesFromCommandLine },
+          configured =
+            chain.firstNotNullOfOrNull { it.rejectPreReleases } ?: (revision != INTEGRATION_REVISION),
         ),
     )
   }
@@ -194,7 +217,8 @@ internal class InheritedSettings(
   val revision: String,
   val checkConstraints: Boolean,
   val checkBuildEnvironmentConstraints: Boolean,
-  val rejectOutOfBoundVersions: Boolean,
+  val rejectOutOfBounds: Boolean,
+  val rejectPreReleases: Boolean,
 )
 
 /** The settings that apply to a single project's producer. */
@@ -203,9 +227,12 @@ internal class ResolvedParameters(
   val filterConfigurations: Spec<Configuration>,
   val filterDeclaredConfigurations: Spec<String>,
   val resolutionStrategy: Action<in ResolutionStrategyWithCurrent>?,
+  val preReleaseVersionIf: Spec<String>?,
+  val exemptFromBuiltInChecksIf: ComponentFilter?,
   val checkConstraints: Boolean,
   val checkBuildEnvironmentConstraints: Boolean,
-  val rejectOutOfBoundVersions: Boolean,
+  val rejectOutOfBounds: Boolean,
+  val rejectPreReleases: Boolean,
 )
 
 /** Registers the per-project producers and wires their results into the accumulator task. */
@@ -219,7 +246,7 @@ internal fun registerAggregation(
   val path = project.path
   // Realized after every project is configured, as the producers' inputs are, so that the values
   // read back from the task are the ones the producers resolved with rather than only what is
-  // configured on this project. All four are taken from one resolution, so a read cannot mix a
+  // configured on this project. All five are taken from one resolution, so a read cannot mix a
   // stale value with a fresh one.
   val inherited =
     project.provider {
@@ -228,7 +255,8 @@ internal fun registerAggregation(
         revision = resolved.revision,
         checkConstraints = resolved.checkConstraints,
         checkBuildEnvironmentConstraints = resolved.checkBuildEnvironmentConstraints,
-        rejectOutOfBoundVersions = resolved.rejectOutOfBoundVersions,
+        rejectOutOfBounds = resolved.rejectOutOfBounds,
+        rejectPreReleases = resolved.rejectPreReleases,
       )
     }
   accumulator.configure { task ->
@@ -608,9 +636,12 @@ private fun statusesOf(
     Resolver(
       project,
       parameters.resolutionStrategy,
-      checkConstraints,
-      parameters.rejectOutOfBoundVersions,
-      onDeprecatedBoundRead,
+      checkConstraints = checkConstraints,
+      rejectOutOfBounds = parameters.rejectOutOfBounds,
+      rejectPreReleases = parameters.rejectPreReleases,
+      preReleaseVersionIf = parameters.preReleaseVersionIf,
+      exemptFromBuiltInChecksIf = parameters.exemptFromBuiltInChecksIf,
+      onDeprecatedBoundRead = onDeprecatedBoundRead,
     )
   // Snapshotted for every configuration before the first resolution, as resolving one
   // configuration runs the lazy actions of the configurations it extends. A build that read the

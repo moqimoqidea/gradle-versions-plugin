@@ -1,5 +1,6 @@
 package com.github.benmanes.gradle.versions.updates
 
+import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ComponentFilter
 import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ComponentSelectionWithCurrent
 import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ResolutionStrategyWithCurrent
 import groovy.xml.XmlSlurper
@@ -36,6 +37,7 @@ import org.gradle.api.attributes.HasConfigurableAttributes
 import org.gradle.api.attributes.java.TargetJvmVersion
 import org.gradle.api.internal.artifacts.DefaultModuleVersionIdentifier
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependencyConstraint
+import org.gradle.api.specs.Spec
 import org.gradle.internal.component.external.model.DefaultModuleComponentIdentifier
 import org.gradle.maven.MavenModule
 import org.gradle.maven.MavenPomArtifact
@@ -50,11 +52,19 @@ class Resolver internal constructor(
   private val project: Project,
   private val resolutionStrategy: Action<in ResolutionStrategyWithCurrent>?,
   private val checkConstraints: Boolean,
-  private val rejectOutOfBoundVersions: Boolean,
+  private val rejectOutOfBounds: Boolean,
+  private val rejectPreReleases: Boolean,
+  /** The convention added to the pre-release check in the build, null when none is configured. */
+  preReleaseVersionIf: Spec<String>?,
+  /** The candidates exempted from both built-in checks in the build, null when none is configured. */
+  exemptFromBuiltInChecksIf: ComponentFilter?,
   /** Called when a rule reads the deprecated bound, so the warning is printed once per project. */
   private val onDeprecatedBoundRead: () -> Unit,
 ) {
-  /** Retained so the arity released before the bound filter was added still links. */
+  /**
+   * Retained so the arity released before the bound and pre-release filters were added still links.
+   * Both filters are on.
+   */
   constructor(
     project: Project,
     resolutionStrategy: Action<in ResolutionStrategyWithCurrent>?,
@@ -63,9 +73,27 @@ class Resolver internal constructor(
     project,
     resolutionStrategy,
     checkConstraints,
-    rejectOutOfBoundVersions = true,
+    rejectOutOfBounds = true,
+    rejectPreReleases = true,
+    preReleaseVersionIf = null,
+    exemptFromBuiltInChecksIf = null,
     onDeprecatedBoundRead = deprecatedBoundWarning(project),
   )
+
+  /**
+   * Whether a version is a pre-release, by the built-in markers or by the convention added in the
+   * build. Handed to every selection wrapper, so the built-in filter and a rule calling
+   * `isPreRelease` read one definition.
+   */
+  private val isPreRelease: (String) -> Boolean = VersionStability.withConvention(preReleaseVersionIf)
+
+  /** Whether a candidate is exempt from the built-in checks; nothing is exempt unless configured. */
+  private val isExempt: (ComponentSelectionWithCurrent) -> Boolean =
+    if (exemptFromBuiltInChecksIf == null) {
+      { false }
+    } else {
+      { current -> exemptFromBuiltInChecksIf.reject(current) }
+    }
 
   private var projectUrls = ConcurrentHashMap<ModuleVersionIdentifier, ProjectUrl>()
 
@@ -239,6 +267,7 @@ class Resolver internal constructor(
     copy.resolutionStrategy.deactivateDependencyLocking()
 
     addDeclaredBoundFilter(copy, current.coordinates)
+    addPreReleaseFilter(copy, current.coordinates)
     addRevisionFilter(copy, revision, current.coordinates)
     addAttributes(copy, configuration)
     addCustomResolutionStrategy(copy, current.coordinates)
@@ -381,7 +410,8 @@ class Resolver internal constructor(
 
   /**
    * Adds the filter that leaves out the upgrades outside the bound declared for a module, which
-   * [ComponentSelectionWithCurrent.isUpgradeOutOfDeclaredBound] identifies.
+   * [ComponentSelectionWithCurrent.isUpgradeOutOfDeclaredBounds] identifies, except for a candidate
+   * exempted with `exemptFromBuiltInChecksIf`.
    *
    * Registered first, ahead of the revision filter and the rules configured in the build, since a
    * rejected candidate is not passed to the rules that follow: the revision filter reads each
@@ -393,15 +423,44 @@ class Resolver internal constructor(
     configuration: Configuration,
     currentCoordinates: Map<Coordinate.Key, Coordinate>,
   ) {
-    if (!rejectOutOfBoundVersions) {
+    if (!rejectOutOfBounds) {
       return
     }
     configuration.resolutionStrategy { inner ->
-      ResolutionStrategyWithCurrent(inner, currentCoordinates).componentSelection { rules ->
+      ResolutionStrategyWithCurrent(inner, currentCoordinates, {}, isPreRelease).componentSelection { rules ->
         rules.all(
           Action<ComponentSelectionWithCurrent> { current ->
-            if (current.isUpgradeOutOfDeclaredBound) {
-              current.reject("Rejected by rejectOutOfBoundVersions")
+            if (current.isOutOfDeclaredBounds() && !isExempt(current)) {
+              current.reject("Rejected by rejectOutOfBounds")
+            }
+          },
+        )
+      }
+    }
+  }
+
+  /**
+   * Adds the filter that leaves out a pre-release candidate while the current version is a release,
+   * as [ComponentSelectionWithCurrent.isPreRelease] reads both. Registered ahead of the revision
+   * filter for the reason given on [addDeclaredBoundFilter], and on the configuration
+   * rather than through [DependencyUpdatesTask.rejectVersionIf]: that setter marks the task's
+   * parameters as having a resolution strategy, and a project marked that way is resolved with its
+   * own strategy instead of its nearest ancestor's, so routing this filter through it would stop
+   * every subproject inheriting the root's `rejectVersionIf`.
+   */
+  private fun addPreReleaseFilter(
+    configuration: Configuration,
+    currentCoordinates: Map<Coordinate.Key, Coordinate>,
+  ) {
+    if (!rejectPreReleases) {
+      return
+    }
+    configuration.resolutionStrategy { inner ->
+      ResolutionStrategyWithCurrent(inner, currentCoordinates, {}, isPreRelease).componentSelection { rules ->
+        rules.all(
+          Action<ComponentSelectionWithCurrent> { current ->
+            if (current.isPreRelease() && !isExempt(current)) {
+              current.reject("Pre-release rejected by rejectPreReleases")
             }
           },
         )
@@ -416,7 +475,12 @@ class Resolver internal constructor(
   ) {
     configuration.resolutionStrategy { inner ->
       resolutionStrategy?.execute(
-        ResolutionStrategyWithCurrent(inner, currentCoordinates, onDeprecatedBoundRead),
+        ResolutionStrategyWithCurrent(
+          inner,
+          currentCoordinates,
+          onDeprecatedBoundRead,
+          isPreRelease,
+        ),
       )
     }
   }
@@ -1072,7 +1136,7 @@ internal fun deprecatedBoundWarning(project: Project): () -> Unit {
     if (warned.compareAndSet(false, true)) {
       project.logger.warn(
         "satisfiesDeclaredBound is deprecated; drop it from rejectVersionIf, " +
-          "since rejectOutOfBoundVersions applies the declared bound instead.",
+          "since rejectOutOfBounds applies the declared bound instead.",
       )
     }
   }
